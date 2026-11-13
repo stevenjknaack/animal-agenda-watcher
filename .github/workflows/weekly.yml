@@ -1,32 +1,50 @@
 name: Weekly digest
 
+# The database lives on a `data` branch as a single commit that each run replaces. The Actions cache is
+# not used for it: caches are evicted after 7 days without access, which a weekly job can miss.
+#
+# First run: start it by hand with "bootstrap" ticked. That run downloads three years of agendas and pays
+# to classify them. Doing the first sync and classification on your own machine and pushing aaw.db to the
+# `data` branch is cheaper to supervise. Scheduled runs refuse to start from an empty database.
+
 on:
   schedule:
     - cron: "0 12 * * 1"   # Mondays 12:00 UTC
   workflow_dispatch:
+    inputs:
+      bootstrap:
+        description: "Allow building the database from nothing (downloads and classifies three years)"
+        type: boolean
+        default: false
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency: weekly-digest
 
 jobs:
   weekly:
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 300
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
       - run: pip install .
-      # The database lives in the Actions cache. Each run saves under a new key and restores the newest one.
-      - uses: actions/cache/restore@v4
-        with:
-          path: aaw.db
-          key: aaw-db-${{ github.run_id }}
-          restore-keys: aaw-db-
-      - run: aaw weekly
+
+      - name: Restore the database from the data branch
+        run: |
+          if git fetch --depth 1 origin data 2>/dev/null; then
+            git show FETCH_HEAD:aaw.db > aaw.db
+            python -c "import sqlite3,sys; r=sqlite3.connect('aaw.db').execute('pragma integrity_check').fetchone()[0]; sys.exit(0 if r=='ok' else 'aaw.db on the data branch is damaged: '+r)"
+          else
+            echo "No data branch yet."
+          fi
+
+      - name: Sync, classify and send the digest
+        id: run
+        run: aaw weekly ${{ inputs.bootstrap && ' ' || '--require-existing' }}
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
@@ -34,8 +52,15 @@ jobs:
           SMTP_USER: ${{ secrets.SMTP_USER }}
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
           DIGEST_TO: ${{ secrets.DIGEST_TO }}
-      - uses: actions/cache/save@v4
-        if: always()
-        with:
-          path: aaw.db
-          key: aaw-db-${{ github.run_id }}
+
+      # Runs after a failed step too, so finished work is kept, but never after a cancel or timeout:
+      # a process killed mid-write can leave a damaged file. The integrity check is a second guard.
+      - name: Save the database to the data branch
+        if: ${{ !cancelled() && hashFiles('aaw.db') != '' }}
+        run: |
+          python -c "import sqlite3,sys; r=sqlite3.connect('aaw.db').execute('pragma integrity_check').fetchone()[0]; sys.exit(0 if r=='ok' else 'not saving a damaged database: '+r)"
+          mkdir /tmp/data && cp aaw.db /tmp/data/ && cd /tmp/data
+          git init -q -b data
+          git add aaw.db
+          git -c user.name="agenda-watcher" -c user.email="actions@users.noreply.github.com" commit -q -m "Database after run ${{ github.run_id }}"
+          git push -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}" data

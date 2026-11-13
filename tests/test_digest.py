@@ -191,3 +191,52 @@ def test_failed_send_does_not_mark_sent(conn, smtp):
     with pytest.raises(digest.DigestError):
         digest.run(conn, CFG, TODAY, ENV, smtp_class=smtp)
     assert len(pending(conn)) == 1
+
+
+def test_item_whose_only_meeting_already_passed_is_reported_once(conn):
+    seed(conn, intro="2026-11-10")
+    on_agenda(conn, 1, 1, "2026-11-12")
+    (e,) = pending(conn)
+    assert e.event_id == 0 and e.meeting_date is None and "12 November 2026" in e.note
+    assert "Already" in digest.render([e], TODAY)[1]
+    digest.mark_sent(conn, [e], datetime(2026, 11, 16, 12))
+    assert pending(conn) == []
+
+
+def test_health_is_empty_when_everything_was_classified(conn):
+    seed(conn)
+    assert digest.health(conn) == []
+
+
+def test_health_reports_unclassified_pending_and_failed_items(conn):
+    seed(conn)
+    store.upsert_matter(conn, "madison", matter(50))
+    store.upsert_matter(conn, "madison", matter(51))
+    store.upsert_matter(conn, "madison", matter(52))
+    classify.run_triage(conn, FakeJudge(keep={51, 52}), since=None)
+    conn.execute("delete from verdicts where matter_id = 50")
+    conn.execute("insert into verdicts (client, matter_id, stage, relevant, reason) values ('madison', 52, 2, null, 'review failed: x')")
+    text = "\n".join(digest.health(conn))
+    assert "1 item has not been classified" in text and "1 item is waiting for review" in text
+    assert "1 review failed" in text and store.matter_url("madison", 52) in text
+
+
+def test_digest_never_says_nothing_new_when_items_went_unchecked(conn, smtp):
+    seed(conn, flagged=())
+    store.upsert_matter(conn, "madison", matter(50))
+    digest.run(conn, CFG, TODAY, ENV, smtp_class=smtp, problems=["Could not reach Legistar for Dane County."])
+    (msg,) = smtp.sent
+    assert msg["Subject"] == "Animal agenda watch: could not check everything"
+    body = msg.get_content()
+    assert "has not been classified" in body and "Could not reach Legistar for Dane County." in body
+    assert "found no new items" not in body
+
+
+def test_problems_are_shown_above_the_items(conn, smtp):
+    seed(conn)
+    on_agenda(conn, 1, 1, "2026-11-19")
+    digest.run(conn, CFG, TODAY, ENV, smtp_class=smtp, problems=["Could not reach Legistar for Dane County."])
+    msg = smtp.sent[0]
+    assert msg["Subject"] == "Animal agenda watch: 1 item (some checks failed)"
+    body = msg.get_content()
+    assert body.index("Could not reach Legistar") < body.index("Title 1")

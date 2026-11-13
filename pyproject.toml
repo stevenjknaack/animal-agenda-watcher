@@ -9,7 +9,7 @@ description = "Finds local government agenda items that affect animals and tells
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.12"
-dependencies = ["httpx>=0.27", "pypdf>=4", "anthropic>=0.40"]
+dependencies = ["httpx>=0.27", "pypdf>=4", "anthropic>=2.8,<3"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]

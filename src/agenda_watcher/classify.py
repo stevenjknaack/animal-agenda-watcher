@@ -6,8 +6,33 @@ from itertools import groupby
 
 from . import store, sync
 from .attachments import extract_text
-from .judge import Judge, JudgeError, TriageItem
+from .judge import Judge, JudgeDown, JudgeError, TriageItem
 from .legistar import LegistarError
+
+
+MAX_CONSECUTIVE_OUTAGES = 3
+MATTER_TEXT_CAP = 60_000
+ATTACHMENT_TEXT_CAP = 30_000
+
+
+class Aborted(Exception):
+    """The run was stopped because the Claude API could not be used. Nothing was marked as judged."""
+
+
+class _Outages:
+    def __init__(self):
+        self.count = 0
+
+    def ok(self) -> None:
+        self.count = 0
+
+    def hit(self, err: JudgeDown, what: str) -> None:
+        self.count += 1
+        if err.fatal:
+            raise Aborted(f"{what} stopped: {err}") from err
+        if self.count >= MAX_CONSECUTIVE_OUTAGES:
+            raise Aborted(f"{what} stopped after {self.count} failures in a row: {err}") from err
+        sync.log(f"  {what}: Claude API unavailable, will retry on the next run: {err}")
 
 
 def _now() -> str:
@@ -32,9 +57,14 @@ def run_triage(conn, judge: Judge, batch_size: int = 50, since: str | None = Non
            where v.matter_id is null
              and (:since is null or m.intro_date >= :since) and (:until is null or m.intro_date <= :until)
            order by m.client, m.matter_id""", {"since": since, "until": until}).fetchall()
-    rows = [r for r in rows if r["label"]]
     model = getattr(judge, "triage_model", None)
+    for r in rows:
+        if not r["label"]:
+            _save(conn, r["client"], r["matter_id"], 1, 0, reason="skipped: no title", model=None)
+    conn.commit()
+    rows = [r for r in rows if r["label"]]
     judged = survivors = 0
+    outages = _Outages()
     for client, group in groupby(rows, key=lambda r: r["client"]):
         group = list(group)
         for start in range(0, len(group), batch_size):
@@ -42,17 +72,19 @@ def run_triage(conn, judge: Judge, batch_size: int = 50, since: str | None = Non
             items = [TriageItem(r["matter_id"], r["label"], r["type"] or "", r["body_name"] or "") for r in batch]
             try:
                 keep, reason = judge.triage(items), None
+                outages.ok()
+            except JudgeDown as e:
+                outages.hit(e, "stage 1")
+                continue  # left unjudged: promoting a whole batch to the costly review is not a safe default
             except JudgeError:
                 keep, reason = {i.matter_id for i in items}, "triage failed"
+                outages.ok()
             for i in items:
                 _save(conn, client, i.matter_id, 1, int(i.matter_id in keep), reason=reason, model=model)
             conn.commit()
             judged += len(items)
             survivors += len(keep)
     return judged, survivors
-
-
-ATTACHMENT_TEXT_CAP = 30_000
 
 
 def _attachments(conn, lg, client: str, matter_id: int) -> list:
@@ -84,10 +116,17 @@ def run_review(conn, legistar, judge: Judge, http, max_attachments: int = 3) -> 
            order by m.client, m.matter_id""").fetchall()
     model = getattr(judge, "review_model", None)
     reviewed = flagged = 0
+    outages = _Outages()
     for r in rows:
         client, matter_id = r["client"], r["matter_id"]
         lg = legistar(client) if callable(legistar) else legistar
         text = sync.fetch_text(conn, lg, client, matter_id)
+        if text is None:  # judging on the title alone would store a verdict that looks final
+            _save(conn, client, matter_id, 2, None, reason="review failed: could not fetch the item text", model=model)
+            conn.commit()
+            reviewed += 1
+            continue
+        text = text[:MATTER_TEXT_CAP]
         atts = _attachments(conn, lg, client, matter_id)
         pieces, room = [], ATTACHMENT_TEXT_CAP
         for a in atts[:max_attachments]:
@@ -99,13 +138,20 @@ def run_review(conn, legistar, judge: Judge, http, max_attachments: int = 3) -> 
                 break
         args = (r["label"], r["type"] or "", r["body_name"] or "", text, [a["name"] or "" for a in atts],
                 "\n\n".join(pieces))
-        review, error = None, None
+        review, error, down = None, None, None
         for _ in range(2):
             try:
                 review = judge.review(*args)
                 break
+            except JudgeDown as e:
+                down = e
+                break
             except JudgeError as e:
                 error = e
+        if down is not None:
+            outages.hit(down, "stage 2")
+            continue  # no row written, so the item stays waiting for review
+        outages.ok()
         if review is None:
             _save(conn, client, matter_id, 2, None, reason=f"review failed: {error}", model=model)
         else:

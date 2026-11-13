@@ -31,14 +31,34 @@ def test_scores_none_when_nothing_labelled(conn):
     assert s.labelled == 0 and s.precision is None and s.recall is None and s.miss_rate_in_random_sample is None
 
 
-def test_miss_rate_uses_only_random_source_labels(conn):
+def test_miss_rate_uses_only_the_random_sample(conn):
     flag(conn, set(), 6)
-    evalset.record_label(conn, "madison", 1, True, None, "random")
+    evalset.record_label(conn, "madison", 1, True, None, "random", random_sample=True)
     for i in (2, 3, 4):
-        evalset.record_label(conn, "madison", i, False, None, "random")
+        evalset.record_label(conn, "madison", i, False, None, "random", random_sample=True)
     evalset.record_label(conn, "madison", 5, True, None, "keyword")
     s = evalset.scores(conn)
     assert s.random_sample_size == 4 and s.miss_rate_in_random_sample == pytest.approx(0.25)
+
+
+def test_random_session_counts_an_already_labelled_item_without_asking_again(conn):
+    flag(conn, set(), 2)
+    evalset.record_label(conn, "madison", 1, True, "wildlife_management", "keyword")
+    rows = evalset.sample_unflagged(conn, 10, seed=1)
+    asked = []
+    evalset.label_session(conn, rows, "random", ask=lambda p: asked.append(p) or "n", out=lambda s: None)
+    assert len(asked) == 1
+    s = evalset.scores(conn)
+    assert s.random_sample_size == 2 and s.miss_rate_in_random_sample == pytest.approx(0.5)
+    assert conn.execute("select source from labels where matter_id=1").fetchone()[0] == "keyword"
+
+
+def test_sample_unflagged_excludes_items_not_fully_classified(conn):
+    flag(conn, set(), 3)
+    store.upsert_matter(conn, "madison", matter(50))                       # never classified
+    store.upsert_matter(conn, "madison", matter(51))
+    classify.run_triage(conn, FakeJudge(keep={50, 51}))                    # 50, 51 awaiting review
+    assert sorted(r["matter_id"] for r in evalset.sample_unflagged(conn, 10, seed=1)) == [1, 2, 3]
 
 
 def test_keyword_hits_match_whole_words_with_plurals(conn):
@@ -57,12 +77,13 @@ def test_keyword_hits_include_agenda_lines_without_matter(conn):
     assert matters == [] and [r["event_item_id"] for r in lines] == [10]
 
 
-def test_sample_unflagged_is_deterministic_and_excludes_flagged_and_labelled(conn):
+def test_sample_unflagged_is_deterministic_excludes_flagged_and_keeps_labelled(conn):
     flag(conn, {1}, 30)
     evalset.record_label(conn, "madison", 2, False, None, "keyword")
     a = [r["matter_id"] for r in evalset.sample_unflagged(conn, 10, seed=7)]
     b = [r["matter_id"] for r in evalset.sample_unflagged(conn, 10, seed=7)]
-    assert a == b and len(a) == 10 and 1 not in a and 2 not in a
+    assert a == b and len(a) == 10 and 1 not in a
+    assert 2 in [r["matter_id"] for r in evalset.sample_unflagged(conn, 29, seed=7)]
     assert a != [r["matter_id"] for r in evalset.sample_unflagged(conn, 10, seed=8)]
 
 

@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import httpx
+import pytest
 
 from agenda_watcher import classify, store
 from agenda_watcher.judge import ClaudeJudge, Review, ReviewOut
@@ -144,3 +145,41 @@ def test_unknown_category_from_model_is_stored_as_null_category():
     assert review.relevant and review.category is None and review.confidence == 1.0
     assert messages.calls[0]["model"] == "review-m"
     assert "legally consider" in messages.calls[0]["system"]
+
+
+def test_text_fetch_failure_records_error_row_without_judging(conn):
+    setup(conn)
+    judge = FakeJudge()
+    assert classify.run_review(conn, FakeLegistar(fail_text=True), judge, http()) == (1, 0)
+    assert judge.review_calls == []
+    (row,) = stage2(conn)
+    assert row[1] is None and "item text" in row[4]
+
+
+def test_very_long_matter_text_is_capped(conn):
+    setup(conn)
+    judge = FakeJudge()
+    classify.run_review(conn, FakeLegistar(text="x" * 200_000), judge, http())
+    assert len(judge.review_calls[0]["text"]) == classify.MATTER_TEXT_CAP
+
+
+def test_review_outage_leaves_item_pending_and_aborts_after_three(conn):
+    setup(conn, survivors=(1, 2, 3, 4), n=4)
+    judge = FakeJudge(down=99)
+    with pytest.raises(classify.Aborted):
+        classify.run_review(conn, FakeLegistar(), judge, http())
+    assert len(judge.review_calls) == 3 and stage2(conn) == []
+
+
+def test_review_fatal_failure_aborts_immediately(conn):
+    setup(conn, survivors=(1, 2), n=2)
+    judge = FakeJudge(down=99, fatal=True)
+    with pytest.raises(classify.Aborted):
+        classify.run_review(conn, FakeLegistar(), judge, http())
+    assert len(judge.review_calls) == 1
+
+
+def test_single_review_outage_is_skipped_and_run_continues(conn):
+    setup(conn, survivors=(1, 2), n=2)
+    assert classify.run_review(conn, FakeLegistar(), FakeJudge(down=1), http()) == (1, 1)
+    assert [r[0] for r in stage2(conn)] == [2]

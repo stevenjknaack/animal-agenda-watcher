@@ -29,21 +29,25 @@ create table if not exists verdicts (
     primary key (client, matter_id, stage));
 create table if not exists labels (
     client text not null, matter_id integer not null,
-    relevant integer not null, category text, source text, note text,
+    relevant integer not null, category text, source text, note text, random_sample integer not null default 0,
     primary key (client, matter_id));
 create table if not exists digested (
     client text not null, matter_id integer not null, event_id integer not null, sent_at text,
     primary key (client, matter_id, event_id));
 create table if not exists meta (key text primary key, value text);
 -- One row per matter. `flagged` is the model's answer; `relevant` is the answer to use: a human label wins.
-create view if not exists final as
+drop view if exists final;
+create view final as
 select m.client, m.matter_id,
+       case when s1.matter_id is null then 'unclassified' when s1.relevant = 0 then 'done'
+            when s2.matter_id is null then 'pending' when s2.relevant is null then 'error' else 'done' end as state,
        case when s2.relevant = 1 then 1 else 0 end as flagged,
        case when l.matter_id is not null then l.relevant when s2.relevant = 1 then 1 else 0 end as relevant,
        case when l.matter_id is not null then (case when l.relevant = 1 then coalesce(l.category, s2.category) end)
             when s2.relevant = 1 then s2.category end as category,
-       s2.summary, s2.reason, s2.confidence, l.source as label_source
+       s2.summary, s2.reason, s2.confidence, l.source as label_source, coalesce(l.random_sample, 0) as random_sample
 from matters m
+left join verdicts s1 on s1.client = m.client and s1.matter_id = m.matter_id and s1.stage = 1
 left join verdicts s2 on s2.client = m.client and s2.matter_id = m.matter_id and s2.stage = 2
 left join labels l on l.client = m.client and l.matter_id = m.matter_id;
 """
@@ -52,6 +56,9 @@ left join labels l on l.client = m.client and l.matter_id = m.matter_id;
 def connect(path: Path | str) -> sqlite3.Connection:
     conn = sqlite3.connect(str(path))
     conn.row_factory = sqlite3.Row
+    has_labels = conn.execute("select 1 from sqlite_master where name = 'labels'").fetchone()
+    if has_labels and "random_sample" not in [r[1] for r in conn.execute("pragma table_info(labels)")]:
+        conn.execute("alter table labels add column random_sample integer not null default 0")
     conn.executescript(SCHEMA)
     return conn
 

@@ -94,7 +94,7 @@ def test_fetch_text_calls_api_once(conn):
     assert lg.text_calls == 1
 
 
-def test_fetch_text_failure_returns_empty_and_is_retried_later(conn):
+def test_fetch_text_failure_returns_none_and_is_retried_later(conn):
     store.upsert_matter(conn, "madison", matter(1))
 
     class Broken(FakeLegistar):
@@ -103,5 +103,5 @@ def test_fetch_text_failure_returns_empty_and_is_retried_later(conn):
             raise LegistarError("boom")
 
     lg = Broken()
-    assert sync.fetch_text(conn, lg, "madison", 1) == ""
+    assert sync.fetch_text(conn, lg, "madison", 1) is None
     assert conn.execute("select text_fetched from matters").fetchone()[0] == 0

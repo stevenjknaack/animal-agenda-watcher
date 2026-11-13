@@ -4,7 +4,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol
 
-from pydantic import BaseModel
+import anthropic
+from pydantic import BaseModel, ValidationError
 
 CATEGORIES = ("animal_agriculture", "wildlife_management", "captive_animals", "sale_and_use",
               "food_policy", "animal_services")
@@ -32,7 +33,8 @@ TRIAGE_SYSTEM = SCOPE + """
 
 You will get a list of agenda items, one per line, as: id | type | body | title.
 This is a first pass on titles only, and a closer review follows, so favour recall. When unsure, keep the item.
-Return the ids of the items worth a closer look. Most lists contain none."""
+Return one decision for every id in the list: keep is true when the item is worth a closer look. \
+Most lists contain none worth keeping."""
 
 REVIEW_SYSTEM = SCOPE + """
 
@@ -66,7 +68,15 @@ class Review:
 
 
 class JudgeError(Exception):
-    pass
+    """The model answered, but not usably (refusal, truncation, malformed output). About this input only."""
+
+
+class JudgeDown(Exception):
+    """The service could not be used. `fatal` means retrying cannot help (bad key, unknown model)."""
+
+    def __init__(self, message: str, fatal: bool = False):
+        super().__init__(message)
+        self.fatal = fatal
 
 
 class Judge(Protocol):
@@ -76,8 +86,13 @@ class Judge(Protocol):
                attachment_names: list[str], attachment_text: str) -> Review: ...
 
 
+class TriageDecision(BaseModel):
+    id: int
+    keep: bool
+
+
 class TriageOut(BaseModel):
-    keep: list[int]
+    decisions: list[TriageDecision]
 
 
 class ReviewOut(BaseModel):
@@ -95,7 +110,6 @@ def _oneline(s: str | None) -> str:
 class ClaudeJudge:
     def __init__(self, triage_model: str, review_model: str, client=None):
         if client is None:
-            import anthropic
             client = anthropic.Anthropic()
         self.client = client
         self.triage_model, self.review_model = triage_model, review_model
@@ -105,7 +119,11 @@ class ClaudeJudge:
             resp = self.client.messages.parse(
                 model=model, max_tokens=max_tokens, system=system,
                 messages=[{"role": "user", "content": content}], output_format=output_format)
-        except Exception as e:  # network, rate limit, validation: all mean "no judgment"
+        except (anthropic.AuthenticationError, anthropic.PermissionDeniedError, anthropic.NotFoundError) as e:
+            raise JudgeDown(f"{type(e).__name__}: {e}", fatal=True) from e
+        except anthropic.APIError as e:  # rate limits, overload, network, and request errors such as no credit
+            raise JudgeDown(f"{type(e).__name__}: {e}") from e
+        except (ValidationError, ValueError) as e:  # the reply did not fit the schema
             raise JudgeError(f"{type(e).__name__}: {e}") from e
         if resp.stop_reason != "end_turn" or resp.parsed_output is None:
             raise JudgeError(f"incomplete response (stop_reason={resp.stop_reason})")
@@ -114,7 +132,9 @@ class ClaudeJudge:
     def triage(self, items: list[TriageItem]) -> set[int]:
         lines = [f"{i.matter_id} | {_oneline(i.type)} | {_oneline(i.body_name)} | {_oneline(i.title)}" for i in items]
         out = self._ask(self.triage_model, TRIAGE_SYSTEM, "\n".join(lines), TriageOut, 8000)
-        return set(out.keep) & {i.matter_id for i in items}
+        ids = {i.matter_id for i in items}
+        dropped = {d.id for d in out.decisions if not d.keep}
+        return ids - dropped  # an id the model kept, or did not mention at all, goes on to review
 
     def review(self, title: str, type: str, body_name: str, text: str,
                attachment_names: list[str], attachment_text: str) -> Review:

@@ -56,7 +56,8 @@ def sync_events(conn, lg, client: str, start: date, end: date) -> int:
     return len(events)
 
 
-def fetch_text(conn, lg, client: str, matter_id: int) -> str:
+def fetch_text(conn, lg, client: str, matter_id: int) -> str | None:
+    """The matter's text, fetched once. None means the fetch failed and should be tried again later."""
     row = conn.execute("select text, text_fetched from matters where client=? and matter_id=?",
                        (client, matter_id)).fetchone()
     if row and row["text_fetched"]:
@@ -65,7 +66,7 @@ def fetch_text(conn, lg, client: str, matter_id: int) -> str:
         text = lg.matter_text(matter_id)
     except LegistarError as err:
         log(f"  no text for {client} matter {matter_id}: {err}")
-        return ""
+        return None
     store.set_matter_text(conn, client, matter_id, text)
     conn.commit()
     return text

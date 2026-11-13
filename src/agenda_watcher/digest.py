@@ -32,6 +32,7 @@ class DigestEntry:
     link: str
     how_to_comment: str
     comment_source_url: str
+    note: str | None = None
 
 
 _COLS = """m.client, m.matter_id, coalesce(nullif(trim(m.title), ''), m.name, '') as title, f.category, f.summary,
@@ -59,8 +60,19 @@ def pending(conn, config, today: date, horizon_days: int = 90) -> list[DigestEnt
               and not exists (select 1 from digested d where d.client = m.client and d.matter_id = m.matter_id
                               and d.event_id = 0)""",
         ((today - timedelta(days=RECENT_DAYS)).isoformat(),)).fetchall()
+    # Introduced recently, and every meeting that listed it has already happened: the short-notice case.
+    heard = conn.execute(
+        f"""select {_COLS}, 0 as event_id, max(e.body_name) as body_name, null as date, null as time,
+                   null as location, max(e.date) as heard_on
+            from final f join matters m on m.client = f.client and m.matter_id = f.matter_id
+            join event_items i on i.client = m.client and i.matter_id = m.matter_id
+            join events e on e.client = i.client and e.event_id = i.event_id
+            where f.relevant = 1 and m.intro_date >= ? and coalesce(e.agenda_status, '') != 'Cancelled'
+              and not exists (select 1 from digested d where d.client = m.client and d.matter_id = m.matter_id)
+            group by m.client, m.matter_id having max(e.date) < ?""",
+        ((today - timedelta(days=RECENT_DAYS)).isoformat(), today.isoformat())).fetchall()
     entries = []
-    for r in list(meetings) + list(unscheduled):
+    for r in list(meetings) + list(unscheduled) + list(heard):
         if r["client"] not in known:
             continue
         c = known[r["client"]]
@@ -70,22 +82,51 @@ def pending(conn, config, today: date, horizon_days: int = 90) -> list[DigestEnt
             meeting_date=date.fromisoformat(r["date"]) if r["date"] else None, meeting_time=r["time"],
             location=" ".join(r["location"].split()) if r["location"] else None,
             link=store.matter_url(r["client"], r["matter_id"]),
-            how_to_comment=c.how_to_comment, comment_source_url=c.comment_source_url))
+            how_to_comment=c.how_to_comment, comment_source_url=c.comment_source_url,
+            note=f"Already on a meeting agenda on {_long(date.fromisoformat(r['heard_on']))}, before this digest ran."
+            if "heard_on" in r.keys() else None))
     return sorted(entries, key=lambda e: (e.meeting_date or date.max, e.client, e.matter_id))
 
 
-def render(entries: list[DigestEntry], today: date) -> tuple[str, str]:
+def _long(d: date) -> str:
+    return f"{d:%A} {d.day} {d:%B %Y}"
+
+
+def health(conn) -> list[str]:
+    """What the watcher could not check. Empty means every stored item has a finished verdict."""
+    counts = dict(conn.execute("select state, count(*) from final group by state").fetchall())
+    out = []
+    n = counts.get("unclassified", 0)
+    if n:
+        out.append(f"{n} item{' has' if n == 1 else 's have'} not been classified.")
+    n = counts.get("pending", 0)
+    if n:
+        out.append(f"{n} item{' is' if n == 1 else 's are'} waiting for review.")
+    n = counts.get("error", 0)
+    if n:
+        out.append(f"{n} review{'' if n == 1 else 's'} failed and will be retried. Check these yourself:")
+        out += [f"  {store.matter_url(r['client'], r['matter_id'])}" for r in conn.execute(
+            "select client, matter_id from final where state = 'error' order by client, matter_id limit 10")]
+    return out
+
+
+def render(entries: list[DigestEntry], today: date, problems: list[str] | tuple = ()) -> tuple[str, str]:
+    warning = []
+    if problems:
+        warning = ["NOT EVERYTHING WAS CHECKED THIS WEEK. Items affecting animals may be missing below.",
+                   *problems, ""]
     if not entries:
+        if problems:
+            return "Animal agenda watch: could not check everything", "\n".join(warning)
         return ("Animal agenda watch: nothing new this week",
                 f"The watcher ran on {today.isoformat()} and found no new items affecting animals.\n")
     n = len(entries)
-    parts = [f"{n} new item{'s' if n != 1 else ''} affecting animals, soonest meeting first.\n"]
+    parts = warning + [f"{n} new item{'s' if n != 1 else ''} affecting animals, soonest meeting first.\n"]
     for e in sorted(entries, key=lambda e: (e.meeting_date or date.max, e.client, e.matter_id)):
         if e.meeting_date:
-            d = e.meeting_date
-            when = f"{d:%A} {d.day} {d:%B %Y}" + (f", {e.meeting_time}" if e.meeting_time else "")
+            when = _long(e.meeting_date) + (f", {e.meeting_time}" if e.meeting_time else "")
         else:
-            when = "Not on a meeting agenda yet"
+            when = e.note or "Not on a meeting agenda yet"
         block = ["-" * 60, e.title, ""]
         if e.summary:
             block += [e.summary, ""]
@@ -96,7 +137,8 @@ def render(entries: list[DigestEntry], today: date) -> tuple[str, str]:
             block += [f"Category: {e.category}"]
         block += [f"Details:  {e.link}", "", f"How to comment: {e.how_to_comment}", f"Source: {e.comment_source_url}", ""]
         parts.append("\n".join(block))
-    return f"Animal agenda watch: {n} item{'s' if n != 1 else ''}", "\n".join(parts)
+    subject = f"Animal agenda watch: {n} item{'s' if n != 1 else ''}"
+    return subject + (" (some checks failed)" if problems else ""), "\n".join(parts)
 
 
 def send(subject: str, body: str, env: Mapping[str, str], smtp_class=None) -> None:
@@ -125,10 +167,15 @@ def mark_sent(conn, entries: list[DigestEntry], now: datetime) -> None:
     conn.commit()
 
 
-def run(conn, config, today: date, env: Mapping[str, str], dry_run: bool = False, out=print, smtp_class=None) -> int:
-    """Build and send the digest. Items are marked sent only after the mail server accepts the message."""
+def run(conn, config, today: date, env: Mapping[str, str], dry_run: bool = False, out=print, smtp_class=None,
+        problems: list[str] | tuple = ()) -> int:
+    """Build and send the digest. Items are marked sent only after the mail server accepts the message.
+
+    `problems` are failures from earlier steps (sync, classification). They and anything `health` finds are
+    put at the top of the email, so a week where the watcher was blind never reads as a quiet week.
+    """
     entries = pending(conn, config, today)
-    subject, body = render(entries, today)
+    subject, body = render(entries, today, list(problems) + health(conn))
     if dry_run:
         out(f"Subject: {subject}\n\n{body}")
         return len(entries)
