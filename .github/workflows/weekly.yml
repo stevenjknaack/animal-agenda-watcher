@@ -1,0 +1,41 @@
+name: Weekly digest
+
+on:
+  schedule:
+    - cron: "0 12 * * 1"   # Mondays 12:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency: weekly-digest
+
+jobs:
+  weekly:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install .
+      # The database lives in the Actions cache. Each run saves under a new key and restores the newest one.
+      - uses: actions/cache/restore@v4
+        with:
+          path: aaw.db
+          key: aaw-db-${{ github.run_id }}
+          restore-keys: aaw-db-
+      - run: aaw weekly
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          DIGEST_TO: ${{ secrets.DIGEST_TO }}
+      - uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: aaw.db
+          key: aaw-db-${{ github.run_id }}

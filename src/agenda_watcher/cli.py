@@ -2,13 +2,14 @@
 from __future__ import annotations
 
 import argparse
+import os
 from datetime import date, timedelta
 from pathlib import Path
 
 import httpx
 
 from . import config as config_mod
-from . import classify, evalset, report, store, sync
+from . import classify, digest, evalset, report, store, sync
 from .legistar import Legistar
 
 UPCOMING_DAYS = 90
@@ -77,6 +78,19 @@ def cmd_report(args, cfg, conn) -> None:
         print(md)
 
 
+def cmd_digest(args, cfg, conn) -> None:
+    n = digest.run(conn, cfg, date.today(), os.environ, dry_run=args.dry_run)
+    sync.log(f"digest: {n} items" + (" (dry run, nothing sent)" if args.dry_run else " sent"))
+
+
+def cmd_weekly(args, cfg, conn) -> None:
+    args.since = args.until = args.stage = None
+    args.dry_run = False
+    cmd_sync(args, cfg, conn)
+    cmd_classify(args, cfg, conn)
+    cmd_digest(args, cfg, conn)
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="aaw", description="Animal Agenda Watcher")
     p.add_argument("--db", default="aaw.db", type=Path)
@@ -99,6 +113,10 @@ def build_parser() -> argparse.ArgumentParser:
     rep = sub.add_parser("report", help="write the backtest report")
     rep.add_argument("--out", type=Path)
     rep.set_defaults(func=cmd_report)
+    dig = sub.add_parser("digest", help="email new flagged items")
+    dig.add_argument("--dry-run", action="store_true", help="print the email instead of sending it")
+    dig.set_defaults(func=cmd_digest)
+    sub.add_parser("weekly", help="sync, classify and send the digest").set_defaults(func=cmd_weekly)
     return p
 
 
@@ -108,5 +126,7 @@ def main(argv: list[str] | None = None) -> None:
     conn = store.connect(args.db)
     try:
         args.func(args, cfg, conn)
+    except digest.DigestError as e:
+        raise SystemExit(f"aaw: {e}")
     finally:
         conn.close()
