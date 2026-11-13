@@ -35,6 +35,17 @@ create table if not exists digested (
     client text not null, matter_id integer not null, event_id integer not null, sent_at text,
     primary key (client, matter_id, event_id));
 create table if not exists meta (key text primary key, value text);
+-- One row per matter. `flagged` is the model's answer; `relevant` is the answer to use: a human label wins.
+create view if not exists final as
+select m.client, m.matter_id,
+       case when s2.relevant = 1 then 1 else 0 end as flagged,
+       case when l.matter_id is not null then l.relevant when s2.relevant = 1 then 1 else 0 end as relevant,
+       case when l.matter_id is not null then (case when l.relevant = 1 then coalesce(l.category, s2.category) end)
+            when s2.relevant = 1 then s2.category end as category,
+       s2.summary, s2.reason, s2.confidence, l.source as label_source
+from matters m
+left join verdicts s2 on s2.client = m.client and s2.matter_id = m.matter_id and s2.stage = 2
+left join labels l on l.client = m.client and l.matter_id = m.matter_id;
 """
 
 
@@ -97,3 +108,7 @@ def get_meta(conn, key: str) -> str | None:
 
 def set_meta(conn, key: str, value: str) -> None:
     conn.execute("insert or replace into meta (key, value) values (?,?)", (key, value))
+
+
+def matter_url(client: str, matter_id: int) -> str:
+    return f"https://{client}.legistar.com/gateway.aspx?m=l&id=/matter.aspx?key={matter_id}"

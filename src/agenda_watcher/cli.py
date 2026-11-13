@@ -8,7 +8,7 @@ from pathlib import Path
 import httpx
 
 from . import config as config_mod
-from . import classify, store, sync
+from . import classify, evalset, store, sync
 from .legistar import Legistar
 
 UPCOMING_DAYS = 90
@@ -48,6 +48,26 @@ def cmd_classify(args, cfg, conn) -> None:
         sync.log(f"stage 2: reviewed {reviewed}, flagged {flagged}, errors awaiting retry {errors}")
 
 
+def cmd_label(args, cfg, conn) -> None:
+    if args.source == "flagged":
+        rows = evalset.unlabelled_flagged(conn)
+    elif args.source == "keyword":
+        rows = evalset.unlabelled_keyword_misses(conn)
+    else:
+        rows = evalset.sample_unflagged(conn, args.n, seed=args.seed)
+    print(f"{len(rows)} items to label ({args.source}).")
+    print(f"Recorded {evalset.label_session(conn, rows, args.source)} labels.")
+
+
+def cmd_scores(args, cfg, conn) -> None:
+    s = evalset.scores(conn)
+    pct = lambda x: "n/a" if x is None else f"{x:.0%}"
+    print(f"hand-checked items: {s.labelled}")
+    print(f"flagged and right: {s.true_pos}   flagged but wrong: {s.false_pos}   relevant but missed: {s.false_neg}")
+    print(f"precision: {pct(s.precision)}   recall on hand-checked items: {pct(s.recall)}")
+    print(f"random unflagged sample: {s.random_sample_size} checked, {pct(s.miss_rate_in_random_sample)} were relevant")
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="aaw", description="Animal Agenda Watcher")
     p.add_argument("--db", default="aaw.db", type=Path)
@@ -61,6 +81,12 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--since", help="stage 1 only: earliest introduction date, YYYY-MM-DD")
     c.add_argument("--until", help="stage 1 only: latest introduction date, YYYY-MM-DD")
     c.set_defaults(func=cmd_classify)
+    lab = sub.add_parser("label", help="hand-check items one at a time")
+    lab.add_argument("--source", choices=("flagged", "keyword", "random"), required=True)
+    lab.add_argument("--n", type=int, default=200, help="random source: sample size")
+    lab.add_argument("--seed", type=int, default=1)
+    lab.set_defaults(func=cmd_label)
+    sub.add_parser("scores", help="print classifier accuracy on hand-checked items").set_defaults(func=cmd_scores)
     return p
 
 
