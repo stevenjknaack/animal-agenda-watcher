@@ -21,3 +21,21 @@ class FakeJudge:
             self.review_failures -= 1
             raise JudgeError("down")
         return self.review_result
+
+
+class FakeLegistar:
+    """Legistar stand-in for review tests: serves matter text and attachment lists."""
+
+    def __init__(self, text="matter text", attachments=None, fail_attachments=False):
+        self.text, self.attachments, self.fail_attachments = text, attachments or {}, fail_attachments
+        self.get_calls = []
+
+    def matter_text(self, matter_id):
+        return self.text
+
+    def get(self, path, params=None):
+        from agenda_watcher.legistar import LegistarError
+        self.get_calls.append(path)
+        if self.fail_attachments:
+            raise LegistarError("boom")
+        return self.attachments.get(int(path.split("/")[2]), [])

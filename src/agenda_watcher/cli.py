@@ -5,6 +5,8 @@ import argparse
 from datetime import date, timedelta
 from pathlib import Path
 
+import httpx
+
 from . import config as config_mod
 from . import classify, store, sync
 from .legistar import Legistar
@@ -37,6 +39,13 @@ def cmd_classify(args, cfg, conn) -> None:
     if args.stage in (None, 1):
         judged, kept = classify.run_triage(conn, judge, since=args.since, until=args.until)
         sync.log(f"stage 1: judged {judged}, kept {kept} for review")
+    if args.stage in (None, 2):
+        clients = {}
+        with httpx.Client(timeout=60) as http:
+            reviewed, flagged = classify.run_review(
+                conn, lambda slug: clients.setdefault(slug, Legistar(slug)), judge, http)
+        errors = conn.execute("select count(*) from verdicts where stage=2 and relevant is null").fetchone()[0]
+        sync.log(f"stage 2: reviewed {reviewed}, flagged {flagged}, errors awaiting retry {errors}")
 
 
 def build_parser() -> argparse.ArgumentParser:

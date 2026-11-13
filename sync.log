@@ -1,2 +1,3 @@
 madison: 12005 matters
   skipped agenda lines for madison event 26690: https://webapi.legistar.com/v1/madison/events/26690/eventitems: gave up after 3 retries (HTTP 500)
+  skipped agenda lines for madison event 26691: https://webapi.legistar.com/v1/madison/events/26691/eventitems: gave up after 3 retries (HTTP 500)
