@@ -1,0 +1,25 @@
+# Adding a city or county is a change to this file only: add another [[clients]] block.
+# `slug` is the Legistar client name, as in https://webapi.legistar.com/v1/<slug>/...
+
+backtest_start = 2023-11-01
+triage_model = "claude-haiku-5-5"
+review_model = "claude-sonnet-5-5"
+
+[[clients]]
+slug = "madison"
+name = "City of Madison"
+how_to_comment = """\
+Register for public comment at cityofmadison.com/MeetingRegistration: pick the meeting and the agenda item, \
+then choose to speak, to be available for questions, or to record support or opposition without speaking. \
+Written comments can be emailed to the meeting's staff contact, listed at the top of its registration page. \
+Not every meeting offers online registration, so check the meeting's own page."""
+comment_source_url = "https://www.cityofmadison.com/council/meetings-agendas/participate-in-council-meetings"
+
+[[clients]]
+slug = "dane"
+name = "Dane County"
+how_to_comment = """\
+Use the registration link printed on the meeting's agenda to sign up to speak; the county asks that you \
+register at least 30 minutes before the meeting starts. Speakers normally get up to five minutes. \
+Check the agenda itself for that meeting's exact instructions."""
+comment_source_url = "https://board.danecounty.gov/meetings/attend-meeting/Providing-Public-Testimony"
