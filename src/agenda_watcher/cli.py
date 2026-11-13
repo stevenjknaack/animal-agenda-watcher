@@ -8,7 +8,7 @@ from pathlib import Path
 import httpx
 
 from . import config as config_mod
-from . import classify, evalset, store, sync
+from . import classify, evalset, report, store, sync
 from .legistar import Legistar
 
 UPCOMING_DAYS = 90
@@ -68,6 +68,15 @@ def cmd_scores(args, cfg, conn) -> None:
     print(f"random unflagged sample: {s.random_sample_size} checked, {pct(s.miss_rate_in_random_sample)} were relevant")
 
 
+def cmd_report(args, cfg, conn) -> None:
+    md = report.build(conn, cfg)
+    if args.out:
+        args.out.write_text(md)
+        print(f"wrote {args.out}")
+    else:
+        print(md)
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="aaw", description="Animal Agenda Watcher")
     p.add_argument("--db", default="aaw.db", type=Path)
@@ -87,6 +96,9 @@ def build_parser() -> argparse.ArgumentParser:
     lab.add_argument("--seed", type=int, default=1)
     lab.set_defaults(func=cmd_label)
     sub.add_parser("scores", help="print classifier accuracy on hand-checked items").set_defaults(func=cmd_scores)
+    rep = sub.add_parser("report", help="write the backtest report")
+    rep.add_argument("--out", type=Path)
+    rep.set_defaults(func=cmd_report)
     return p
 
 
